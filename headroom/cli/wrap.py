@@ -2313,6 +2313,10 @@ def claude(
 
         env = os.environ.copy()
         env["ANTHROPIC_BASE_URL"] = _claude_proxy_base_url(port)
+        if not no_rtk:
+            from headroom.rtk import RTK_BIN_DIR
+
+            env["PATH"] = f"{RTK_BIN_DIR}{os.pathsep}{env['PATH']}"
 
         result = subprocess.run([claude_bin, *claude_args], env=env)
         raise SystemExit(result.returncode)
