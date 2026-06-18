@@ -69,8 +69,8 @@ print("=" * 64)
 # [1] Env -------------------------------------------------------------------
 head("[1] Environment variables")
 for v in copilot_auth._API_TOKEN_ENV_VARS + copilot_auth._COPILOT_OAUTH_TOKEN_ENV_VARS:
-    # presence only — never echo any value derived from a token env var
-    print(f"    {v:38s} {'SET' if os.environ.get(v) else 'unset'}")
+    # presence by KEY only — never read the value of a token env var
+    print(f"    {v:38s} {'SET' if v in os.environ else 'unset'}")
 for v in (
     "GITHUB_COPILOT_API_URL",
     "GITHUB_COPILOT_ENTERPRISE_URL",
