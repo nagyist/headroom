@@ -124,6 +124,35 @@ def test_a7_never_worse_than_a6():
     assert len(out7) <= len(out6)  # A7 >= A6 compression, always
 
 
+def test_a7_gain_gate_boundary_default_095(monkeypatch):
+    monkeypatch.delenv("HEADROOM_A7_MIN_LOSSY_GAIN", raising=False)
+    block = _grep_block()
+    r, _ = _router(lossless_then_lossy=True)
+    assert abs(r._a7_min_lossy_gain - 0.95) < 1e-9  # default is 0.95
+    fold_tok = len(r._lossless_first(block, __import__("headroom.transforms.content_router",
+        fromlist=["CompressionStrategy"]).CompressionStrategy.SEARCH)[0].split())
+    # Kompress that removes ~6% of fold tokens -> ratio ~0.94 <= 0.95 -> chained.
+    keep = int(fold_tok * 0.94)
+    r._try_ml_compressor = lambda c, ctx, q=None: (" ".join(["w"]*keep), keep)  # type: ignore
+    _, was, tr, rc = _run(r, block)
+    assert was is True and rc.get("lossless_then_lossy_accept") == 1
+    # Same result would be REJECTED under the old 0.90 gate (0.94 > 0.90).
+
+
+def test_a7_gain_gate_env_override(monkeypatch):
+    monkeypatch.setenv("HEADROOM_A7_MIN_LOSSY_GAIN", "0.80")
+    r, _ = _router(lossless_then_lossy=True)
+    assert abs(r._a7_min_lossy_gain - 0.80) < 1e-9  # env override wins
+    block = _grep_block()
+    fold_tok = len(r._lossless_first(block, __import__("headroom.transforms.content_router",
+        fromlist=["CompressionStrategy"]).CompressionStrategy.SEARCH)[0].split())
+    keep = int(fold_tok * 0.90)  # 10% cut: passes 0.95 default but FAILS the 0.80 override
+    r._try_ml_compressor = lambda c, ctx, q=None: (" ".join(["w"]*keep), keep)  # type: ignore
+    _, was, tr, rc = _run(r, block)
+    assert rc.get("lossless_accept") == 1  # kept pure fold under strict 0.80 gate
+    assert rc.get("lossless_then_lossy_accept", 0) == 0
+
+
 def test_a7_noop_in_lossless_only_mode():
     block = _grep_block()
     # lossless-only mode ignores A7 (never emits lossy) even if the flag is set.

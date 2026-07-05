@@ -1268,10 +1268,13 @@ class ContentRouter(Transform):
 
     # A7 (lossless-then-lossy): the lossy pass replaces the byte-exact fold only
     # if it removes a further meaningful chunk — Kompress output must be <= this
-    # fraction of the fold's tokens (i.e. >= 10% additional reduction). Below
-    # that the marginal lossy gain isn't worth the accuracy cost when a lossless
-    # fold is already in hand, so the pure fold is kept.
-    _A7_MIN_LOSSY_GAIN = 0.90
+    # fraction of the fold's tokens (default 0.95 => >= 5% additional reduction).
+    # Below that the marginal lossy gain isn't worth the accuracy cost when a
+    # lossless fold is already in hand, so the pure fold is kept. Overridable at
+    # runtime via env HEADROOM_A7_MIN_LOSSY_GAIN (read in __init__) so the gate
+    # can be tuned per deployment without a code edit + overlay rebuild. Lower =
+    # stricter (fewer lossy chains, safer); higher/1.0 = fire on any improvement.
+    _A7_MIN_LOSSY_GAIN = 0.95
 
     def __init__(
         self,
@@ -1354,6 +1357,16 @@ class ContentRouter(Transform):
             or os.environ.get("HEADROOM_LOSSLESS_THEN_LOSSY", "").strip().lower()
             in ("1", "true", "yes", "on")
         )
+        # A7 gate: keep the lossy chain only if Kompress <= this fraction of the
+        # fold's tokens. Env override (HEADROOM_A7_MIN_LOSSY_GAIN) falls back to
+        # the class default; a malformed value falls back rather than crashing.
+        try:
+            self._a7_min_lossy_gain: float = float(
+                os.environ.get("HEADROOM_A7_MIN_LOSSY_GAIN")
+                or self._A7_MIN_LOSSY_GAIN
+            )
+        except (TypeError, ValueError):
+            self._a7_min_lossy_gain = self._A7_MIN_LOSSY_GAIN
 
         # TOIN integration for cross-strategy learning
         self._toin: Any = None
@@ -1914,7 +1927,7 @@ class ContentRouter(Transform):
             # A7 (lossless-then-lossy, lossy mode only): don't stop at the fold —
             # run the aggressive lossy compressor (Kompress) on the byte-folded
             # remainder and keep it IFF it removes a further meaningful chunk
-            # (Kompress tokens <= _A7_MIN_LOSSY_GAIN * fold tokens). This keeps
+            # (Kompress tokens <= _a7_min_lossy_gain * fold tokens). This keeps
             # the byte-fold AND reclaims the semantic word-drop tail while never
             # doing worse than the fold (on no/marginal lossy gain we return the
             # pure fold). DIFF folds are always returned verbatim — Kompressing
@@ -1937,7 +1950,7 @@ class ContentRouter(Transform):
                     _komp, _komp_tokens = None, None
                 if (
                     _komp is not None
-                    and _komp_tokens <= _fold_tokens * self._A7_MIN_LOSSY_GAIN
+                    and _komp_tokens <= _fold_tokens * self._a7_min_lossy_gain
                     and len(_komp) < len(_ll_content)
                 ):
                     return (
