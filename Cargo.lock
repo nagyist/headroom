@@ -1916,6 +1916,7 @@ dependencies = [
  "futures-util",
  "gcp_auth",
  "headroom-core",
+ "headroom-simulators",
  "http 1.4.2",
  "http-body-util",
  "humantime",
