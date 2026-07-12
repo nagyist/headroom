@@ -24,7 +24,12 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from headroom import paths as _paths
 from headroom._subprocess import run
-from headroom.proxy import request_limit_policy, sse_byte_buffer_policy, wire_debug_redaction_policy
+from headroom.proxy import (
+    request_limit_policy,
+    sse_byte_buffer_policy,
+    wire_debug_format_policy,
+    wire_debug_redaction_policy,
+)
 from headroom.proxy.body_forwarding import (
     BodyMutationTracker as BodyMutationTracker,  # noqa: F401 - compatibility export
 )
@@ -119,7 +124,7 @@ def redact_for_wire_debug(value: Any) -> Any:
 
 
 def _safe_event_name(event: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in event)[:80]
+    return wire_debug_format_policy.safe_wire_debug_name(event)
 
 
 def _wire_debug_preview(value: Any, *, max_chars: int | None = None) -> str:
@@ -130,22 +135,7 @@ def _wire_debug_preview(value: Any, *, max_chars: int | None = None) -> str:
     deliberate trim boundary belongs.
     """
 
-    try:
-        if isinstance(value, bytes):
-            text = value.decode("utf-8", errors="replace")
-        elif isinstance(value, str):
-            text = value
-        elif value is None:
-            return ""
-        else:
-            text = json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
-    except Exception:
-        text = repr(value)
-
-    text = " ".join(text.split())
-    if max_chars is not None and len(text) > max_chars:
-        return text[: max_chars - 1] + "…"
-    return text
+    return wire_debug_format_policy.wire_debug_preview(value, max_chars=max_chars)
 
 
 def capture_codex_wire_debug(
