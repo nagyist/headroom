@@ -282,7 +282,7 @@ class InputCompressedOriginalMessagesRule:
 
 class CorsScopeRule:
     id = "PY005"
-    summary = "proxy CORS defaults must be localhost-scoped and config-port aware"
+    summary = "proxy CORS defaults must be localhost-scoped with explicit wildcard opt-in"
 
     server_path = Path("headroom/proxy/server.py")
     policy_path = Path("headroom/proxy/cors.py")
@@ -298,6 +298,10 @@ class CorsScopeRule:
                 "cors_origins_for_config(config)",
                 "CORSMiddleware must use cors_origins_for_config(config)",
             ),
+            (
+                "cors_origin_regex_for_config(config)",
+                "CORSMiddleware must use cors_origin_regex_for_config(config)",
+            ),
             ("allow_credentials=False", "CORS credentials must be disabled"),
         ]
         for needle, message in server_checks:
@@ -306,7 +310,10 @@ class CorsScopeRule:
         policy_checks = [
             ("CORS_ORIGINS_ENV", "CORS env override must be centralized"),
             ("os.environ.get(CORS_ORIGINS_ENV", "wildcard/custom CORS must be env-explicit"),
-            ("config.port", "default CORS origins must use the effective config port"),
+            (
+                "DEFAULT_LOOPBACK_ORIGIN_REGEX",
+                "default CORS origins must be scoped to loopback hosts",
+            ),
         ]
         for needle, message in policy_checks:
             if needle not in policy_text:
