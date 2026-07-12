@@ -1894,7 +1894,11 @@ class OpenAIHandlerMixin:
                     _tc = self.openai_provider.get_token_counter(model)
                     _dtoks = _tc.count_text(
                         _json_debug_dumps(
-                            [t for t in _deferred_tools if isinstance(t, dict) and t.get("defer_loading")]
+                            [
+                                t
+                                for t in _deferred_tools
+                                if isinstance(t, dict) and t.get("defer_loading")
+                            ]
                         )
                     )
                     if _dtoks > 0:
