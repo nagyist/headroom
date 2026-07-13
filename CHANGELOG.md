@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- **memory:** annotate `_EMBEDDER_CACHE` as `dict[tuple[str, str, str], Embedder]` to match the 3-element key (backend, model, ollama_base_url). The stale 2-tuple annotation made `mypy headroom` fail on `main`, which broke the `lint` CI job on every open PR.
 - **install:** include `orjson` in the `[proxy]` extra so `uv tool install "headroom-ai[all]"` satisfies LiteLLM OpenRouter/provider backends that import it at runtime ([#2056](https://github.com/headroomlabs-ai/headroom/issues/2056)).
 - The dashboard's per-request metadata (the `recent_requests` / `request_logs`
   tail and the `config` block with upstream URLs) is gated to loopback callers
