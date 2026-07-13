@@ -190,6 +190,14 @@ def _resolve_openai_upstream_base(request_headers: dict[str, str]) -> str | None
     normalized = _normalize_origin(raw_base_url)
     if normalized is None:
         return None
+
+    # _normalize_origin drops the path; re-attach it so a custom upstream served
+    # from a sub-path (e.g. https://host/api/v1) is preserved rather than routed
+    # to the bare origin.
+    path = (urlparse(raw_base_url.strip()).path or "").rstrip("/")
+    if path:
+        normalized = f"{normalized}{path}"
+
     if urlparse(normalized).scheme not in {"http", "https"}:
         return None
     return normalized
