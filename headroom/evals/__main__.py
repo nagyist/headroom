@@ -367,6 +367,46 @@ def cmd_report(args: argparse.Namespace) -> None:
     print(f"Report generated: {output_path}")
 
 
+def cmd_swebench(args: argparse.Namespace) -> None:
+    """Run the SWE-bench A/B agentic eval (Headroom compression on vs off)."""
+    from headroom.evals.swebench import (
+        SwebenchConfig,
+        render_markdown,
+        run_swebench_eval,
+        write_outputs,
+    )
+
+    arms = tuple(a.strip() for a in args.arms.split(",") if a.strip())
+    cfg = SwebenchConfig(
+        model=args.model,
+        subset=args.subset,
+        split=args.split,
+        slice=args.slice,
+        instances=args.instances,
+        workers=args.workers,
+        port=args.port,
+        arms=arms,
+        mode=args.mode,
+        config_spec=args.config,
+        reasoning_effort=args.reasoning_effort,
+        grade=not args.no_grade,
+        grade_workers=args.grade_workers,
+        auto_start_proxy=not args.no_proxy,
+        upstream_anthropic_url=args.upstream_anthropic_url,
+        upstream_openai_url=args.upstream_openai_url,
+        skip_upstream_check=args.skip_upstream_check,
+        output_dir=args.output or "",
+    )
+
+    result = run_swebench_eval(cfg)
+    paths = write_outputs(result, result.base_dir)
+
+    print("\n" + render_markdown(result))
+    print("Reports written:")
+    for name, path in paths.items():
+        print(f"  {name}: {path}")
+
+
 def main() -> None:
     # Load API keys from .env
     try:
@@ -392,6 +432,8 @@ Examples:
   python -m headroom.evals suite --tier 2               # Run Tiers 1+2 (~$8)
   python -m headroom.evals suite --tier 1 --ci          # CI mode (exit 1 on fail)
   python -m headroom.evals report -i results.json       # Generate HTML report
+  python -m headroom.evals swebench --slice 0:5 --no-grade   # SWE-bench A/B smoke (5 tasks)
+  python -m headroom.evals swebench --subset verified        # Full Verified A/B (needs Docker)
 
 Available datasets by category:
   RAG:          hotpotqa, natural_questions, triviaqa, msmarco, squad
@@ -458,6 +500,68 @@ Install dependencies:
     report_parser.add_argument("-i", "--input", required=True, help="Input JSON results file")
     report_parser.add_argument("-o", "--output", help="Output HTML file")
     report_parser.set_defaults(func=cmd_report)
+
+    # SWE-bench A/B agentic eval command
+    swe_parser = subparsers.add_parser(
+        "swebench", help="A/B agentic SWE-bench eval: Headroom compression on vs off"
+    )
+    swe_parser.add_argument(
+        "--model", default="anthropic/claude-sonnet-4-5-20250929", help="litellm model string"
+    )
+    swe_parser.add_argument(
+        "--subset", default="verified", help="verified | lite | full | <hf dataset path>"
+    )
+    swe_parser.add_argument(
+        "--split", default="test", help="dataset split (Verified/Lite scoring uses 'test')"
+    )
+    swe_parser.add_argument(
+        "--slice", default="", help="instance slice, e.g. '0:5' for a smoke run"
+    )
+    swe_parser.add_argument("--instances", default="", help="regex filter on instance_id")
+    swe_parser.add_argument("-w", "--workers", type=int, default=1, help="agent-run parallelism")
+    swe_parser.add_argument(
+        "--arms",
+        default="baseline,headroom",
+        help="comma-separated arms; 'baseline' = proxy passthrough (optimize off)",
+    )
+    swe_parser.add_argument(
+        "--mode", default="cache", help="Headroom optimize mode for the treatment arm"
+    )
+    swe_parser.add_argument(
+        "--config",
+        default="swebench.yaml",
+        help="mini-swe-agent config (use swebench_backticks.yaml for text-only models)",
+    )
+    swe_parser.add_argument(
+        "--reasoning-effort", default="", help="reasoning effort: low|medium|high|xhigh"
+    )
+    swe_parser.add_argument("--port", type=int, default=8787, help="Headroom proxy port")
+    swe_parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="Don't auto-start the proxy (single-arm; use a proxy you started)",
+    )
+    swe_parser.add_argument(
+        "--no-grade",
+        action="store_true",
+        help="Skip the official SWE-bench grader (no Docker needed)",
+    )
+    swe_parser.add_argument("--grade-workers", type=int, default=4, help="grader Docker parallelism")
+    swe_parser.add_argument(
+        "--upstream-anthropic-url",
+        default="",
+        help="override proxy upstream (Anthropic) — e.g. a local simulator",
+    )
+    swe_parser.add_argument(
+        "--upstream-openai-url", default="", help="override proxy upstream (OpenAI)"
+    )
+    swe_parser.add_argument(
+        "--skip-upstream-check",
+        action="store_true",
+        help="don't gate /readyz on upstream reachability (for mock upstreams)",
+    )
+    swe_parser.add_argument("-o", "--output", help="base output directory")
+    swe_parser.set_defaults(func=cmd_swebench)
 
     args = parser.parse_args()
 

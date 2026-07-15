@@ -236,6 +236,16 @@ evals = [
     "anthropic>=0.18.0",
     "openai>=1.0.0",
 ]
+# SWE-bench agentic A/B eval (mini-swe-agent driver + official grader).
+# Opt-in only (like the deliberately-excluded lm-eval benchmark tooling above):
+# it pulls a large agent/eval stack and needs a Docker daemon, so it is NOT part
+# of `all`. Install with `pip install headroom-ai[swebench]`.
+swebench = [
+    "mini-swe-agent>=2.4.0",
+    "swebench>=3.0.0",
+    "litellm>=1.86.2,<2.0; python_version < '3.14'",
+    "datasets>=2.14.0",
+]
 # AWS Bedrock backend
 bedrock = [
     # `aws login` (IAM Identity Provider / console-login, DPoP) requires
