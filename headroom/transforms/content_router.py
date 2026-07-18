@@ -244,6 +244,44 @@ def _build_compressor_registry() -> CompressorRegistry:
     return registry
 
 
+# Canonical map from the router's internal :class:`ContentType` to the MIME
+# string an external ``headroom.compressor`` declares in
+# ``CompressorDescriptor.content_types``. Mirrors the MIME strings used by the
+# built-in descriptors above (so an external JSON compressor declares the same
+# ``application/json`` a built-in would), with ``text/x-diff`` added for
+# ``GIT_DIFF`` (no built-in descriptor covers diffs). This is the ONLY bridge
+# between the enum the router routes on and the pure-string content type the
+# registry contract carries; it is read solely by the opt-in external-dispatch
+# branch and never on the default request path.
+_CONTENT_TYPE_TO_MIME: dict[ContentType, str] = {
+    ContentType.JSON_ARRAY: "application/json",
+    ContentType.SOURCE_CODE: "text/x-code",
+    ContentType.SEARCH_RESULTS: "text/x-search-results",
+    ContentType.BUILD_OUTPUT: "text/x-log",
+    ContentType.GIT_DIFF: "text/x-diff",
+    ContentType.HTML: "text/html",
+    ContentType.TABULAR: "text/csv",
+    ContentType.STRUCTURED_CONFIG: "text/x-config",
+    ContentType.PLAIN_TEXT: "text/plain",
+}
+
+
+def _external_compressor_matches(descriptor: CompressorDescriptor, content_mime: str) -> bool:
+    """True if ``descriptor`` declares support for ``content_mime``.
+
+    Accepts an exact MIME match, a full wildcard (``"*"`` or ``"*/*"``), or a
+    type wildcard (``"text/*"`` matches ``"text/plain"``). Anything else is a
+    non-match, so a selected external compressor only ever sees content it
+    explicitly declared it can handle.
+    """
+    declared = descriptor.content_types or []
+    if content_mime in declared:
+        return True
+    top = content_mime.split("/", 1)[0]
+    type_wildcard = f"{top}/*"
+    return any(d in ("*", "*/*") or d == type_wildcard for d in declared)
+
+
 def _tool_call_args_text(raw: Any) -> str:
     """Compact, query-usable text from a tool call's args.
 
@@ -1231,6 +1269,18 @@ class ContentRouterConfig:
     # Tool exclusion (Read/Glob/...) and reversibility gates still apply.
     force_kompress_all: bool = False
 
+    # Opt-in selection of EXTERNAL (non-built-in) `headroom.compressor` names to
+    # route real traffic through. `None`/empty (the default) means the external-
+    # dispatch branch in `_apply_strategy_to_content` is inert and the request
+    # path is byte-identical to today. Built-in names are NOT put here — they are
+    # selected via the `enable_*` flags above (see the proxy's
+    # `_apply_compressor_selection`). `"*"` activates every discovered external
+    # compressor. The router resolves these names against `compressor_registry`
+    # and, when a block's detected content type matches an active external
+    # compressor's declared `content_types`, runs it via the registry contract
+    # instead of the built-in if/elif — fail-open back to the built-in path.
+    active_external_compressors: list[str] | None = None
+
     # No-CCR lossless mode. When True the router compresses LOG/SEARCH/DIFF
     # content with format-native lossless compaction (headroom.transforms.
     # lossless_compaction) instead of the lossy Rust drop path, and never
@@ -1495,6 +1545,15 @@ class ContentRouter(Transform):
         except Exception as exc:  # noqa: BLE001 - inventory is non-critical
             logger.debug("compressor registry unavailable: %s", exc)
             self.compressor_registry = CompressorRegistry()
+
+        # Resolve the opt-in EXTERNAL compressor selection ONCE — the registry
+        # and `config.active_external_compressors` are both fixed after
+        # construction. Empty unless the operator selected a non-built-in
+        # compressor (via `--compressor`), so the external-dispatch branch in
+        # `_apply_strategy_to_content` is a single cheap guard and the default
+        # request path stays byte-identical. Built-in registry entries are
+        # filtered out here so they are only ever dispatched by the if/elif.
+        self._active_external_compressors: list[Any] = self._resolve_active_external_compressors()
 
         # Lazy-loaded compressors
         self._code_compressor: Any = None
@@ -2259,6 +2318,188 @@ class ContentRouter(Transform):
             return False
         return self._lossless_first(content, CompressionStrategy.PASSTHROUGH)[1] is not None
 
+    # ── External compressor dispatch (opt-in; fail-open) ──────────────────────
+
+    def _resolve_active_external_compressors(self) -> list[Any]:
+        """Resolve the opt-in external compressor selection against the registry.
+
+        Returns the active EXTERNAL compressor objects (built-in inventory
+        entries filtered out — they own the if/elif dispatch, never the
+        registry). Empty when nothing external is selected or resolution fails,
+        so the caller's external-dispatch branch is inert by default.
+        """
+        selection = self.config.active_external_compressors
+        if not selection:
+            return []
+        try:
+            active = self.compressor_registry.active(set(selection))
+        except Exception as exc:  # noqa: BLE001 - selection is non-critical
+            logger.debug("external compressor resolution failed: %s", exc)
+            return []
+        return [c for c in active if not isinstance(c, _BuiltinCompressorEntry)]
+
+    def _try_external_compressor(
+        self,
+        content: str,
+        strategy: CompressionStrategy,
+        context: str,
+        question: str | None,
+    ) -> tuple[str, int, list[str]] | None:
+        """Route a block through a *selected* external compressor, or ``None``.
+
+        Opt-in and fail-open. Returns ``None`` — leaving the built-in if/elif
+        dispatch to run UNCHANGED — whenever:
+
+          * no external compressor was selected (the default: a single cheap
+            guard, so the request path is byte-identical to today);
+          * none of the active external compressors declares this block's
+            detected content type;
+          * the chosen compressor raises, returns malformed/empty output, or
+            would expand the content.
+
+        On success it returns the router's normal ``(content, tokens, chain)``
+        shape: the external output, tokens counted with the router's OWN
+        estimator (never the compressor's self-reported count), and an
+        ``["external:<name>"]`` chain. Any ``recoverable`` (hash -> original)
+        map is persisted to the CCR store exactly like SmartCrusher's mirror,
+        so ``/v1/retrieve/{hash}`` resolves.
+
+        Reached only in lossy/CCR mode: ``_apply_strategy_to_content`` returns
+        earlier in lossless-only mode (STAGE 0), so an external compressor can
+        never inject unrecoverable loss into a lossless-only session.
+        """
+        active = self._active_external_compressors
+        if not active:
+            return None
+        content_mime = _CONTENT_TYPE_TO_MIME.get(self._content_type_from_strategy(strategy))
+        if content_mime is None:
+            return None
+        for compressor in active:
+            try:
+                descriptor = compressor.descriptor
+            except Exception as exc:  # noqa: BLE001 - a broken external is isolated
+                logger.debug("external compressor descriptor unavailable: %s", exc)
+                continue
+            if not _external_compressor_matches(descriptor, content_mime):
+                continue
+            result = self._run_external_compressor(
+                compressor, descriptor.name, content, content_mime, context, question
+            )
+            if result is not None:
+                return result
+        return None
+
+    def _run_external_compressor(
+        self,
+        compressor: Any,
+        name: str,
+        content: str,
+        content_mime: str,
+        context: str,
+        question: str | None,
+    ) -> tuple[str, int, list[str]] | None:
+        """Invoke one external compressor via the contract; fail open to ``None``."""
+        inp = CompressInput(
+            content=content,
+            content_type=content_mime,
+            query=question or context or "",
+            config={},
+            budget={},
+        )
+        try:
+            out = compressor.compress(inp)
+        except Exception as exc:  # noqa: BLE001 - fail open to the built-in path
+            logger.warning(
+                "external compressor %r raised (%s); falling back to built-in", name, exc
+            )
+            return None
+        if not isinstance(out, CompressOutput) or not isinstance(out.content, str):
+            logger.warning(
+                "external compressor %r returned malformed output (%s); falling back",
+                name,
+                type(out).__name__,
+            )
+            return None
+        compressed = out.content
+        # Never blank out a non-empty block (an empty user/tool block makes
+        # providers reject the request); fall back so the built-in path runs.
+        if content.strip() and not compressed.strip():
+            logger.warning(
+                "external compressor %r produced empty output; falling back to built-in", name
+            )
+            return None
+        # Never let an external compressor expand a block; fall back so the
+        # built-in path (or passthrough) can do better.
+        if len(compressed) > len(content):
+            logger.debug(
+                "external compressor %r expanded content (%d -> %d chars); falling back",
+                name,
+                len(content),
+                len(compressed),
+            )
+            return None
+        # Count with the router's OWN estimator, not the compressor's self-report.
+        compressed_tokens = _estimate_tokens(compressed)
+        # Persist the hash -> original recovery map the SAME way SmartCrusher
+        # mirrors its markers, so a later /v1/retrieve resolves each hash.
+        self._persist_external_recoverable(out.recoverable, name, context)
+        if out.warnings:
+            logger.debug(
+                "external compressor %r warnings: %s", name, "; ".join(map(str, out.warnings))
+            )
+        if out.markers and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "external compressor %r markers: %s", name, "; ".join(map(str, out.markers))
+            )
+        return compressed, compressed_tokens, [f"external:{name}"]
+
+    def _persist_external_recoverable(
+        self, recoverable: dict[str, str], name: str, context: str
+    ) -> None:
+        """Mirror an external compressor's hash -> original map into the CCR store.
+
+        Mirrors SmartCrusher's ``_mirror_single_hash_to_python_store``: each
+        entry is stored under its own hash via ``explicit_hash`` so a
+        ``/v1/retrieve/{hash}`` lookup returns the original. Best-effort — a
+        store failure or a non-hex hash is logged and never breaks the request
+        (the compressed block is still returned; only that entry is unretrievable).
+        """
+        if not recoverable:
+            return
+        try:
+            from ..cache.compression_store import get_compression_store
+
+            store = get_compression_store()
+        except Exception as exc:  # noqa: BLE001 - CCR store optional/stripped builds
+            logger.debug("external compressor %r: CCR store unavailable (%s)", name, exc)
+            return
+        strategy_label = f"external:{name}"
+        for ccr_hash, original in recoverable.items():
+            if not isinstance(ccr_hash, str) or not isinstance(original, str):
+                logger.debug("external compressor %r: skipping non-str recoverable entry", name)
+                continue
+            try:
+                store.store(
+                    original=original,
+                    # The compressed payload isn't meaningfully addressable per
+                    # hash here; use a placeholder marker (as SmartCrusher does
+                    # — /v1/retrieve returns original_content, not compressed).
+                    compressed=f"<<external:{name}:{ccr_hash}>>",
+                    query_context=context or None,
+                    compression_strategy=strategy_label,
+                    explicit_hash=ccr_hash,
+                )
+            except ValueError:
+                # explicit_hash must be hex; a malformed hash means this entry
+                # won't be retrievable, but the request must not break.
+                logger.warning(
+                    "external compressor %r: recoverable hash %r is not hex; not stored",
+                    name,
+                    ccr_hash,
+                )
+            except Exception as exc:  # noqa: BLE001 - defensive; never break the request
+                logger.debug("external compressor %r: store.store raised (%s)", name, exc)
+
     def _apply_strategy_to_content(
         self,
         content: str,
@@ -2380,6 +2621,19 @@ class ContentRouter(Transform):
         # CCR/lossy mode, nothing foldable (code/json/text/mixed) and no relevance
         # split → fall through to the lossy compressors below (kompress /
         # smart_crusher / code), which attach CCR retrieval markers when enabled.
+
+        # ── External compressor dispatch (opt-in) ────────────────────────────
+        # Immediately before the built-in if/elif, give a *selected* external
+        # `headroom.compressor` first crack at this block IFF its declared
+        # content_types match the block's detected content type. This runs only
+        # when the operator selected a non-built-in compressor, so with no such
+        # selection it is a single cheap guard and everything below is
+        # byte-identical to today. Fully fail-open: a non-match, an error,
+        # malformed/empty output, or an expansion all return None and fall
+        # through to the EXISTING built-in dispatch UNCHANGED.
+        external = self._try_external_compressor(content, strategy, context, question)
+        if external is not None:
+            return external
 
         try:
             if strategy == CompressionStrategy.CODE_AWARE:

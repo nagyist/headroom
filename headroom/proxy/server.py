@@ -697,6 +697,32 @@ def _apply_compressor_selection(
         setattr(router_config, flag, select_all or name in selected)
 
 
+def _external_compressor_selection(compressors: set[str] | None) -> list[str] | None:
+    """Return the selected EXTERNAL (non-built-in) compressor names, or ``None``.
+
+    The built-in selection (:func:`_apply_compressor_selection`) consumes only
+    the names in :data:`BUILTIN_COMPRESSOR_FLAGS`; every OTHER selected name is a
+    third-party ``headroom.compressor`` entry point. This threads those to the
+    router (via ``ContentRouterConfig.active_external_compressors``) so it can
+    route matching blocks through them.
+
+    Returns ``None`` — the router's external-dispatch branch stays inert, so the
+    request path is byte-identical to today — when the selection is empty or
+    contains only recognized built-in names. ``"*"`` is preserved so the router
+    activates every discovered external compressor (mirroring the wildcard's
+    "select everything" meaning on the built-in side).
+    """
+    if not compressors:
+        return None
+    selected = {name.strip() for name in compressors if name.strip()}
+    if not selected:
+        return None
+    if "*" in selected:
+        return ["*"]
+    external = sorted(selected - set(BUILTIN_COMPRESSOR_FLAGS))
+    return external or None
+
+
 class HeadroomProxy(
     StreamingMixin,
     AnthropicHandlerMixin,
@@ -802,6 +828,13 @@ class HeadroomProxy(
         # Runs BEFORE the disable_kompress override below so that flag stays
         # authoritative for turning Kompress off.
         _apply_compressor_selection(router_config, config.compressors)
+        # External (non-built-in) `headroom.compressor` selections are ignored by
+        # `_apply_compressor_selection` (they have no enable_* flag). Thread them
+        # to the router here so it can route matching blocks through them; None
+        # (no external selected) keeps the external-dispatch branch inert.
+        router_config.active_external_compressors = _external_compressor_selection(
+            config.compressors
+        )
         # No-CCR lossless mode: compress tool outputs with format-native
         # lossless compaction and marker-free SmartCrusher, and suppress every
         # retrieval marker + the retrieve-tool injection so no MCP round-trip is
