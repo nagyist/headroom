@@ -2671,6 +2671,48 @@ class ContentRouter(Transform):
             except Exception as exc:  # noqa: BLE001 - defensive; never break the request
                 logger.debug("external compressor %r: store.store raised (%s)", name, exc)
 
+    def _registry_compress_content(
+        self,
+        name: str,
+        strategy: CompressionStrategy,
+        content: str,
+        context: str,
+        bias: float,
+    ) -> str:
+        """Compress ``content`` with a built-in via the compressor registry.
+
+        Resolves the built-in named ``name`` from :attr:`compressor_registry` and
+        runs it over the pure-data :class:`CompressInput` contract, returning the
+        compressed string. This is the registry-resolved equivalent of the
+        router's historical ``self._get_<name>().compress(...)`` dispatch: the
+        built-in adapter delegates to the SAME ``_get_*`` getter and method with
+        the SAME arguments (``context`` as the query, ``bias`` via the budget), so
+        the returned content is byte-identical to the direct call.
+
+        Callers keep their own ``if self.config.enable_<x>:`` gate and ``_get_*``
+        availability guard (which preserves the built-in-unavailable → passthrough
+        behavior the adapter's None→content collapse would otherwise hide) and
+        recompute the token count with the branch's own metric, so the branch's
+        return shape is unchanged.
+        """
+        entry = self.compressor_registry.get(name)
+        if entry is None:
+            # Built-in inventory is always registered by _build_compressor_registry;
+            # defensive only — fall back to the unchanged content.
+            return content
+        output = entry.compress(
+            CompressInput(
+                content=content,
+                content_type=_CONTENT_TYPE_TO_MIME.get(
+                    self._content_type_from_strategy(strategy), "text/plain"
+                ),
+                query=context,
+                config={},
+                budget={"bias": bias},
+            )
+        )
+        return output.content
+
     def _apply_strategy_to_content(
         self,
         content: str,
@@ -2876,11 +2918,13 @@ class ContentRouter(Transform):
                     compressor = self._get_search_compressor()
                     if compressor:
                         compressor_name = type(compressor).__name__
-                        result = compressor.compress(content, context=context, bias=bias)
-                        compressed, compressed_tokens = (
-                            result.compressed,
-                            _estimate_tokens(result.compressed),
+                        # Registry-resolved dispatch: the built-in "search" adapter
+                        # delegates to this same getter+method, so the content is
+                        # byte-identical to the historical direct call.
+                        compressed = self._registry_compress_content(
+                            "search", strategy, content, context, bias
                         )
+                        compressed_tokens = _estimate_tokens(compressed)
                         decision_reason = "search_compressor"
 
             elif strategy == CompressionStrategy.LOG:
@@ -2888,15 +2932,17 @@ class ContentRouter(Transform):
                     compressor = self._get_log_compressor()
                     if compressor:
                         compressor_name = type(compressor).__name__
-                        result = compressor.compress(content, bias=bias)
+                        # Registry-resolved dispatch: the built-in "log" adapter
+                        # delegates to this same getter+method, so the content is
+                        # byte-identical to the historical direct call.
+                        compressed = self._registry_compress_content(
+                            "log", strategy, content, context, bias
+                        )
                         # Use the same word-count metric the rest of the
                         # router uses; `compressed_line_count` is in
                         # lines, not tokens — recording it here made
                         # ratios meaningless against `original_tokens`.
-                        compressed, compressed_tokens = (
-                            result.compressed,
-                            _estimate_tokens(result.compressed),
-                        )
+                        compressed_tokens = _estimate_tokens(compressed)
                         decision_reason = "log_compressor"
 
             elif strategy == CompressionStrategy.TABULAR:
@@ -2904,11 +2950,13 @@ class ContentRouter(Transform):
                     compressor = self._get_tabular_compressor()
                     if compressor:
                         compressor_name = type(compressor).__name__
-                        result = compressor.compress(content, context=context, bias=bias)
-                        compressed, compressed_tokens = (
-                            result.compressed,
-                            _estimate_tokens(result.compressed),
+                        # Registry-resolved dispatch: the built-in "tabular" adapter
+                        # delegates to this same getter+method, so the content is
+                        # byte-identical to the historical direct call.
+                        compressed = self._registry_compress_content(
+                            "tabular", strategy, content, context, bias
                         )
+                        compressed_tokens = _estimate_tokens(compressed)
                         decision_reason = "tabular_compressor"
 
             elif strategy == CompressionStrategy.CONFIG:
@@ -2916,11 +2964,14 @@ class ContentRouter(Transform):
                     compressor = self._get_config_compressor()
                     if compressor:
                         compressor_name = type(compressor).__name__
-                        result = compressor.compress(content, context=context, bias=bias)
-                        compressed, compressed_tokens = (
-                            result.compressed,
-                            len(result.compressed.split()),
+                        # Registry-resolved dispatch: the built-in "config" adapter
+                        # delegates to this same getter+method, so the content is
+                        # byte-identical to the historical direct call. Keep the
+                        # branch's own whitespace-split token metric.
+                        compressed = self._registry_compress_content(
+                            "config", strategy, content, context, bias
                         )
+                        compressed_tokens = len(compressed.split())
                         decision_reason = "config_compressor"
 
             elif strategy == CompressionStrategy.DIFF:
