@@ -44,6 +44,22 @@ def _get_litellm_module() -> Any | None:
 
 logger = logging.getLogger("headroom.proxy")
 
+# Pricing-lookup warnings are emitted on the per-request cost path, so an
+# unresolvable model (a custom / OpenAI-compatible name LiteLLM can't price,
+# e.g. glm-5.2) floods proxy.log with an identical WARNING every single request
+# (#2504). Track which models have already been warned so each fires once per
+# process; the set is tiny and bounded by the number of distinct models seen.
+_warned_pricing_models: set[str] = set()
+
+
+def _warn_pricing_once(model: str, message: str) -> None:
+    """Emit ``message`` at WARNING only the first time ``model`` fails pricing."""
+    if model in _warned_pricing_models:
+        return
+    _warned_pricing_models.add(model)
+    logger.warning(message)
+
+
 # Provider-specific cache discount multipliers (what fraction of input price)
 # Used to calculate dollar savings from prefix caching
 _CACHE_ECONOMICS = {
@@ -706,7 +722,10 @@ class CostTracker:
         """
         litellm = _get_litellm_module()
         if litellm is None:
-            logger.warning("LiteLLM not available - cannot calculate costs")
+            _warn_pricing_once(
+                f"__litellm_unavailable__:{model}",
+                f"LiteLLM not available - cannot calculate costs for model {model}",
+            )
             return None
 
         try:
@@ -728,7 +747,7 @@ class CostTracker:
             return float(total_cost) if total_cost > 0 else None
 
         except Exception as e:
-            logger.warning(f"Failed to get pricing for model {model}: {e}")
+            _warn_pricing_once(model, f"Failed to get pricing for model {model}: {e}")
             return None
 
     def _prune_old_costs(self):
